@@ -91,7 +91,8 @@ static void intx_test(uint8_t dev, struct results *r)
 	int rc = irq_connect_dynamic(PCIE_ZIRQ, 1, pcie_isr, NULL, 0);
  
 	irq_enable(PCIE_ZIRQ);
-	printk("         ISR registered (rc=%d)\n", rc);
+	/* arch_irq_connect_dynamic() just returns the irq it was given, so rc is not a success code */
+	printk("         ISR installed on irq 0x%x\n", rc);
 #endif
 	sys_write32(1, BAR0_ADDR + REG_DOORBELL);
  
@@ -108,13 +109,20 @@ static void intx_test(uint8_t dev, struct results *r)
 #if ISR_AVAILABLE
 	via_isr = (isr_count > 0);
 #endif
+	int isr_runs = 0;
+ 
+#if ISR_AVAILABLE
+	isr_runs = isr_count;
+#endif
 	if (via_isr) {
-		claim = PCIE_IRQ;       /* Zephyr's PLIC driver claimed and dispatched it */
+		claim = 0;              /* Zephyr's PLIC driver claimed it before calling the ISR */
+		printk("         INTx asserted: endpoint status.int=%u, ISR ran %d time(s) "
+		       "(PLIC claim done by Zephyr's driver)\n", st1, isr_runs);
 	} else {
 		claim = sys_read32(PLIC_BASE + 0x200004);   /* poll the claim register */
+		printk("         INTx asserted: endpoint status.int=%u plic_claim=%u (expected %u) via polling\n",
+		       st1, claim, PCIE_IRQ);
 	}
-	printk("         INTx asserted: endpoint status.int=%u plic_claim=%u (expected %u) via %s\n",
-	       st1, claim, PCIE_IRQ, via_isr ? "ISR" : "polling");
  
 	sys_write32(0, BAR0_ADDR + REG_DOORBELL);                 /* clear the device */
 	if (!via_isr && claim) {
@@ -124,7 +132,7 @@ static void intx_test(uint8_t dev, struct results *r)
  
 	printk("         INTx cleared:  endpoint status.int=%u\n", st2);
 	r->intx = (st1 == 1 && st2 == 0);
-	r->intx_plic = (claim == PCIE_IRQ);
+	r->intx_plic = via_isr ? (isr_runs >= 1) : (claim == PCIE_IRQ);
 	r->isr = via_isr;
 }
  
@@ -251,7 +259,7 @@ int main(void)
 	printk("Endpoint MMIO read          : %s\n", pf(r.mmio_read));
 	printk("MMIO round trip             : %s\n", pf(r.round_trip));
 	printk("INTx interrupt (endpoint)   : %s\n", pf(r.intx));
-	printk("INTx reached PLIC (claim)   : %s\n", pf(r.intx_plic));
+	printk("INTx reached CPU (ISR/claim) : %s\n", pf(r.intx_plic));
 	printk("MSI (capability -> PLIC)    : %s\n", pf(r.msi));
 	printk("Interrupt handled by ISR    : %s\n", r.isr ? "PASS" : "NOT TAKEN (polled instead)");
  

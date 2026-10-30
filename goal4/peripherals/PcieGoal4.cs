@@ -31,7 +31,7 @@ namespace Antmicro.Renode.Connectors
  
     public interface IPcieInterruptSink { void SetInterrupt(bool level); }              // INTx line
     public interface IPcieMsiSink { void ReceiveMsi(uint address, uint data); }         // MSI memory write
-    public interface IPcieBridge { bool WindowCovers(uint address); bool BusMasterEnabled(); }
+    public interface IPcieBridge { bool WindowCovers(uint address); bool AddressInWindow(uint address); bool BusMasterEnabled(); }
  
     public static class PcieConnectorExtensions
     {
@@ -173,6 +173,16 @@ namespace Antmicro.Renode.Connectors
                         return;
                     }
                 }
+                // An MSI is an upstream write: an address INSIDE the bridge memory window would be routed
+                // downstream by a real bridge, so it can not be an upstream MSI.
+                foreach(var c in clients)
+                {
+                    if(c is IPcieBridge bridge && bridge.AddressInWindow(address))
+                    {
+                        Trace(string.Format("[CONNECTOR] MSI blocked: address 0x{0:X8} is inside the bridge memory window", address));
+                        return;
+                    }
+                }
                 Trace(string.Format("[CONNECTOR] MSI write addr=0x{0:X8} data=0x{1:X} forwarded to Root Port side", address, data));
                 foreach(var c in clients)
                 {
@@ -236,6 +246,12 @@ namespace Antmicro.Renode.Peripherals.PCI
             {
                 return false;                                   // Memory Space Enable off
             }
+            return AddressInWindow(address);
+        }
+ 
+        // Only the memory base/limit registers (no enable bits): is the address inside the bridge window?
+        public bool AddressInWindow(uint address)
+        {
             var v = cfg[0x20 / 4];
             uint b = (v & 0xFFF0u) << 16;                       // memory base
             uint l = (((v >> 16) & 0xFFF0u) << 16) | 0xFFFFFu;  // memory limit
