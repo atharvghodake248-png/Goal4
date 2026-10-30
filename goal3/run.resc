@@ -1,0 +1,12 @@
+using sysbus
+include @D:/1_Project/goal3/peripherals/PcieStubRootPort.cs
+
+mach create "rp"
+machine LoadPlatformDescription @D:/1_Project/goal3/ae350_pcie_stub.repl
+
+showAnalyzer sysbus.uart1
+logLevel 3 sysbus.cpu0
+logLevel -1 sysbus.pcieStub
+
+sysbus LoadELF @D:/1_Project/goal3/fw/zephyr.elf
+start

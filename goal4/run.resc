@@ -11,5 +11,7 @@ mach create "rp"
 machine LoadPlatformDescriptionFromString "using \"D:/1_Project/goal4/ae350_pcie_rp.repl\""
 showAnalyzer sysbus.uart1
 logLevel -1 sysbus.pcieRp
+logLevel -1 sysbus.pcieBar
 connector Connect sysbus.pcieRp pcie
-sysbus LoadELF @D:/1_Project/goal3/fw/zephyr.elf
+connector Connect sysbus.pcieBar pcie
+sysbus LoadELF @D:/1_Project/goal4/fw/zephyr.elf

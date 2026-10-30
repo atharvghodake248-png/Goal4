@@ -1,3 +1,4 @@
 using "platforms/cpus/andes_ae350_n25.repl"
 
 pcieRp: PCI.PcieRootPort @ sysbus 0x90000000
+pcieBar: PCI.PcieBarWindow @ sysbus 0xA0000000
