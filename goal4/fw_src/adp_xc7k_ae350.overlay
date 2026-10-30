@@ -1,0 +1,28 @@
+/ {
+	/delete-node/ leds;
+	/delete-node/ gpio_keys;
+	aliases {
+		/delete-property/ gpio-0;
+		/delete-property/ counter-0;
+		/delete-property/ i2c-0;
+		/delete-property/ led0;
+		/delete-property/ led1;
+		/delete-property/ sw0;
+		/delete-property/ eeprom-0;
+	};
+	chosen {
+		/delete-property/ zephyr,flash;
+		/delete-property/ zephyr,flash-controller;
+	};
+};
+
+&l2_cache { status = "disabled"; };
+&syscon { status = "disabled"; };
+&gpio0 { status = "disabled"; };
+&pit0 { status = "disabled"; };
+&spi0 { status = "disabled"; };
+&spi1 { status = "disabled"; };
+&i2c0 { status = "disabled"; };
+&wdt { status = "disabled"; };
+&dma0 { status = "disabled"; };
+&mbox { status = "disabled"; };

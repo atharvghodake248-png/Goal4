@@ -6,27 +6,32 @@ using Antmicro.Renode.Peripherals;
 using Antmicro.Renode.Peripherals.Bus;
 using Antmicro.Renode.Peripherals.PCI;
  
-// Goal 4 (part 1): Root Port + Endpoint + connector, all in ONE file so that
-// Renode compiles them into a single assembly (no cross-file type references).
-// Pattern of the connector is copied from Renode's GPIOConnector:
+// Goal 4: Root Port (Type 1) + Endpoint (Type 0, BAR, capability list, MSI) + connector.
+// All classes are in ONE file so Renode compiles them into a single assembly.
+// Connector pattern copied from Renode's GPIOConnector:
 //   IExternal + IConnectable<IPeripheral> + AttachTo + CreateXxxConnector extension.
  
 namespace Antmicro.Renode.Connectors
 {
-    // What the connector needs from the Endpoint side.
-    public interface IPcieConfigTarget
+    // ---- what the connector needs from each side ----
+    public interface IPcieConfigTarget                      // Endpoint side
     {
         uint ConfigRead(int reg);
         void ConfigWrite(int reg, uint value);
-        uint BarRead(long offset);
-        void BarWrite(long offset, uint value);
+        uint BarRead(uint address);
+        void BarWrite(uint address, uint value);
+        void SetUpstream(PcieConnector connector);
     }
  
-    // What the connector needs from the Root Port side.
-    public interface IPcieConnectorClient
+    public interface IPcieConnectorClient                   // Root Port machine side
     {
         void SetConnector(PcieConnector connector);
+        void Trace(string message);
     }
+ 
+    public interface IPcieInterruptSink { void SetInterrupt(bool level); }              // INTx line
+    public interface IPcieMsiSink { void ReceiveMsi(uint address, uint data); }         // MSI memory write
+    public interface IPcieBridge { bool WindowCovers(uint address); bool BusMasterEnabled(); }
  
     public static class PcieConnectorExtensions
     {
@@ -54,10 +59,11 @@ namespace Antmicro.Renode.Connectors
                         throw new RecoverableException("Endpoint is already attached to this PCIe connector.");
                     }
                     endpoint = target;
+                    target.SetUpstream(this);
                 }
                 else
                 {
-                    throw new RecoverableException("Peripheral must be a PCIe Root Port or a PCIe Endpoint.");
+                    throw new RecoverableException("Peripheral must be a PCIe Root Port side peripheral or a PCIe Endpoint.");
                 }
             }
         }
@@ -71,7 +77,19 @@ namespace Antmicro.Renode.Connectors
             }
         }
  
-        // Only bus 0 / device 0 / function 0 is wired to the Endpoint.
+        // The connector has no logger of its own; it asks the first Root Port side peripheral to print.
+        public void Trace(string message)
+        {
+            lock(sync)
+            {
+                if(clients.Count > 0 && clients[0] is IPcieConnectorClient c)
+                {
+                    c.Trace(message);
+                }
+            }
+        }
+ 
+        // ---- config space: bus 1 / device 0 / function 0 is the Endpoint ----
         public uint ConfigRead(int dev, int fn, int reg)
         {
             lock(sync)
@@ -80,6 +98,7 @@ namespace Antmicro.Renode.Connectors
                 {
                     return 0xFFFFFFFF;
                 }
+                Trace(string.Format("[CONNECTOR] ConfigRead reg 0x{0:X} forwarded to Endpoint", reg));
                 return endpoint.ConfigRead(reg);
             }
         }
@@ -92,28 +111,90 @@ namespace Antmicro.Renode.Connectors
                 {
                     return;
                 }
+                Trace(string.Format("[CONNECTOR] ConfigWrite reg 0x{0:X} forwarded to Endpoint", reg));
                 endpoint.ConfigWrite(reg, value);
             }
         }
  
-        // BAR0 accesses (memory space) are forwarded to the Endpoint as well.
-        public uint BarRead(long offset)
+        // ---- memory space (BAR) ----
+        // The access must be inside the bridge memory window (and the bridge must have Memory Space on);
+        // the Endpoint then checks it against its own BAR0.
+        public uint BarRead(uint address)
         {
             lock(sync)
             {
-                return endpoint == null ? 0xFFFFFFFF : endpoint.BarRead(offset);
+                if(endpoint == null || !BridgeAllowsWindow(address))
+                {
+                    return 0xFFFFFFFF;
+                }
+                Trace(string.Format("[CONNECTOR] BAR read 0x{0:X8} forwarded to Endpoint", address));
+                return endpoint.BarRead(address);
             }
         }
  
-        public void BarWrite(long offset, uint value)
+        public void BarWrite(uint address, uint value)
         {
             lock(sync)
             {
-                if(endpoint != null)
+                if(endpoint == null || !BridgeAllowsWindow(address))
                 {
-                    endpoint.BarWrite(offset, value);
+                    return;
+                }
+                Trace(string.Format("[CONNECTOR] BAR write 0x{0:X8} forwarded to Endpoint", address));
+                endpoint.BarWrite(address, value);
+            }
+        }
+ 
+        // ---- interrupts: Endpoint -> Root Port side ----
+        public void RaiseInterrupt(bool level)
+        {
+            lock(sync)
+            {
+                Trace(string.Format("[CONNECTOR] INTx {0} forwarded to Root Port side", level ? "assert" : "deassert"));
+                foreach(var c in clients)
+                {
+                    if(c is IPcieInterruptSink sink)
+                    {
+                        sink.SetInterrupt(level);
+                    }
                 }
             }
+        }
+ 
+        public void SendMsi(uint address, uint data)
+        {
+            lock(sync)
+            {
+                foreach(var c in clients)
+                {
+                    if(c is IPcieBridge bridge && !bridge.BusMasterEnabled())
+                    {
+                        Trace("[CONNECTOR] MSI blocked: bridge Bus Master Enable is off");
+                        return;
+                    }
+                }
+                Trace(string.Format("[CONNECTOR] MSI write addr=0x{0:X8} data=0x{1:X} forwarded to Root Port side", address, data));
+                foreach(var c in clients)
+                {
+                    if(c is IPcieMsiSink sink)
+                    {
+                        sink.ReceiveMsi(address, data);
+                    }
+                }
+            }
+        }
+ 
+        private bool BridgeAllowsWindow(uint address)
+        {
+            foreach(var c in clients)
+            {
+                if(c is IPcieBridge bridge && !bridge.WindowCovers(address))
+                {
+                    Trace(string.Format("[CONNECTOR] access 0x{0:X8} blocked: outside bridge memory window or Memory Space off", address));
+                    return false;
+                }
+            }
+            return true;
         }
  
         private readonly List<IPeripheral> clients = new List<IPeripheral>();
@@ -126,41 +207,98 @@ namespace Antmicro.Renode.Peripherals.PCI
 {
     using Antmicro.Renode.Connectors;
  
-    // Root Port side (machine "rp"). Still a simplified ECAM window (Type 1 header comes later),
-    // but config accesses now go through the connector instead of an internal cfg[] array.
-    public class PcieRootPort : IDoubleWordPeripheral, IKnownSize, IPcieConnectorClient
+    // ===================== Root Port (machine "rp") =====================
+    // Type 1 (PCI-PCI bridge) header at 00:00.0. Config accesses to the secondary bus go through the connector.
+    public class PcieRootPort : IDoubleWordPeripheral, IKnownSize, IPcieConnectorClient, IPcieBridge
     {
         public PcieRootPort(IMachine machine)
         {
             this.machine = machine;
+            Reset();
         }
  
-        public void SetConnector(PcieConnector connector)
+        public void SetConnector(PcieConnector connector) { this.connector = connector; }
+        public void Trace(string message) { this.Log(LogLevel.Debug, "{0}", message); }
+ 
+        public void Reset()
         {
-            this.connector = connector;
+            cfg = new uint[1024];
+            cfg[0x00 / 4] = 0x00011234;  // Device ID 0x0001 | Vendor ID 0x1234
+            cfg[0x04 / 4] = 0x00000000;  // Command = 0, Status = 0
+            cfg[0x08 / 4] = 0x06040001;  // Class 0x06 bridge, subclass 0x04 PCI-PCI, Rev 1
+            cfg[0x0C / 4] = 0x00010000;  // Header type 0x01 (bridge)
         }
  
-        public void Reset() { }
+        // Bridge forwarding rules used by the connector for memory (BAR) accesses.
+        public bool WindowCovers(uint address)
+        {
+            if((cfg[0x04 / 4] & 0x2) == 0)
+            {
+                return false;                                   // Memory Space Enable off
+            }
+            var v = cfg[0x20 / 4];
+            uint b = (v & 0xFFF0u) << 16;                       // memory base
+            uint l = (((v >> 16) & 0xFFF0u) << 16) | 0xFFFFFu;  // memory limit
+            return l >= b && address >= b && address <= l;
+        }
+ 
+        public bool BusMasterEnabled() { return (cfg[0x04 / 4] & 0x4) != 0; }
  
         public uint ReadDoubleWord(long offset)
         {
             Decode(offset, out var bus, out var dev, out var fn, out var reg);
-            if(bus != 0 || connector == null)
+            if(bus == 0)
+            {
+                if(dev != 0 || fn != 0)
+                {
+                    return 0xFFFFFFFF;
+                }
+                var v = cfg[reg / 4];
+                this.Log(LogLevel.Debug, "RP CFG RD 00:00.0 (bridge) reg 0x{0:X} -> 0x{1:X8}", reg, v);
+                return v;
+            }
+            if(!IsSecondaryBus(bus) || connector == null)
             {
                 return 0xFFFFFFFF;
             }
-            var v = connector.ConfigRead(dev, fn, reg);
-            if(v != 0xFFFFFFFF)
+            var r = connector.ConfigRead(dev, fn, reg);
+            if(r != 0xFFFFFFFF)
             {
-                this.Log(LogLevel.Debug, "RP CFG RD {0:X2}:{1:X2}.{2} reg 0x{3:X} -> 0x{4:X8} (via connector)", bus, dev, fn, reg, v);
+                this.Log(LogLevel.Debug, "RP CFG RD {0:X2}:{1:X2}.{2} reg 0x{3:X} -> 0x{4:X8} (via connector)", bus, dev, fn, reg, r);
             }
-            return v;
+            return r;
         }
  
         public void WriteDoubleWord(long offset, uint value)
         {
             Decode(offset, out var bus, out var dev, out var fn, out var reg);
-            if(bus != 0 || connector == null)
+            if(bus == 0)
+            {
+                if(dev != 0 || fn != 0)
+                {
+                    return;
+                }
+                this.Log(LogLevel.Debug, "RP CFG WR 00:00.0 (bridge) reg 0x{0:X} <- 0x{1:X8}", reg, value);
+                switch(reg)
+                {
+                    case 0x00: case 0x08: case 0x0C: case 0x10: case 0x14: // read-only here
+                        break;
+                    case 0x04: // Command: lower 16 bits writable
+                        cfg[reg / 4] = (cfg[reg / 4] & 0xFFFF0000) | (value & 0x0000FFFF);
+                        break;
+                    case 0x18: // primary / secondary / subordinate bus numbers
+                        cfg[reg / 4] = value & 0x00FFFFFF;
+                        break;
+                    case 0x20: // memory base / limit (1 MB granularity)
+                        cfg[reg / 4] = value & 0xFFF0FFF0;
+                        break;
+                    default:
+                        cfg[reg / 4] = value;
+                        break;
+                }
+                return;
+            }
+            if(!IsSecondaryBus(bus) || connector == null)
             {
                 return;
             }
@@ -168,7 +306,13 @@ namespace Antmicro.Renode.Peripherals.PCI
             connector.ConfigWrite(dev, fn, reg, value);
         }
  
-        public long Size => 0x100000;   // 1 MB ECAM window, bus 0 only
+        public long Size => 0x1000000;  // 16 MB ECAM window = 16 buses (bus field = offset bits 27:20)
+ 
+        private bool IsSecondaryBus(int bus)
+        {
+            var sec = (int)((cfg[0x18 / 4] >> 8) & 0xFF);
+            return sec != 0 && bus == sec;
+        }
  
         private static void Decode(long offset, out int bus, out int dev, out int fn, out int reg)
         {
@@ -178,26 +322,34 @@ namespace Antmicro.Renode.Peripherals.PCI
             fn  = (int)((offset >> 12) & 0x7);
         }
  
+        private uint[] cfg;
         private PcieConnector connector;
         private readonly IMachine machine;
     }
  
-    // BAR window on the Root Port machine: memory-space accesses to the address the firmware
-    // assigned to BAR0 (0xA0000000) are forwarded through the connector to the Endpoint.
-    // The address is fixed in the .repl (it matches what the firmware programs into BAR0).
-    public class PcieBarWindow : IDoubleWordPeripheral, IKnownSize, IPcieConnectorClient
+    // ============ BAR window on the Root Port machine (memory space of the bridge) ============
+    // Memory accesses to 0xA0000000.. are forwarded through the connector to the Endpoint.
+    // The window address is fixed in the .repl; the connector and Endpoint still check the bridge
+    // memory window, Memory Space Enable and the Endpoint's programmed BAR0 before accepting an access.
+    public class PcieBarWindow : IDoubleWordPeripheral, IKnownSize, IPcieConnectorClient, IPcieInterruptSink
     {
         public PcieBarWindow(IMachine machine)
         {
             this.machine = machine;
+            IRQ = new GPIO();
         }
  
-        public void SetConnector(PcieConnector connector)
-        {
-            this.connector = connector;
-        }
+        public GPIO IRQ { get; private set; }     // wired in the .repl: IRQ -> plic@20 (INTx)
  
+        public void SetConnector(PcieConnector connector) { this.connector = connector; }
+        public void Trace(string message) { this.Log(LogLevel.Debug, "{0}", message); }
         public void Reset() { }
+ 
+        public void SetInterrupt(bool level)
+        {
+            this.Log(LogLevel.Debug, "RP INTx line -> {0}", level ? "ASSERTED" : "deasserted");
+            IRQ.Set(level);
+        }
  
         public uint ReadDoubleWord(long offset)
         {
@@ -205,7 +357,7 @@ namespace Antmicro.Renode.Peripherals.PCI
             {
                 return 0xFFFFFFFF;
             }
-            var v = connector.BarRead(offset);
+            var v = connector.BarRead(WindowBase + (uint)offset);
             this.Log(LogLevel.Debug, "RP BAR RD off 0x{0:X} -> 0x{1:X8} (via connector)", offset, v);
             return v;
         }
@@ -217,19 +369,63 @@ namespace Antmicro.Renode.Peripherals.PCI
                 return;
             }
             this.Log(LogLevel.Debug, "RP BAR WR off 0x{0:X} <- 0x{1:X8} (via connector)", offset, value);
-            connector.BarWrite(offset, value);
+            connector.BarWrite(WindowBase + (uint)offset, value);
         }
  
         public long Size => 0x1000;
  
+        private const uint WindowBase = 0xA0000000;   // must match the .repl
         private PcieConnector connector;
         private readonly IMachine machine;
     }
  
-    // Endpoint side (machine "ep"): Type 0 header + BAR0 (4 KB register block).
-    // Config space is reached through the connector (IPcieConfigTarget).
-    // The BAR0 register block is also visible on the ep machine's own bus (forwarding of BAR
-    // accesses from rp is a later part).
+    // ============ MSI target on the Root Port machine ============
+    // An MSI is a memory write by the Endpoint to the address the firmware programmed into the MSI capability.
+    // This window (0xB0000000) receives it, raises its IRQ line (-> PLIC) and holds the message data.
+    // Firmware reads offset 0 to get the data and writes offset 0 to clear the interrupt.
+    public class PcieMsiWindow : IDoubleWordPeripheral, IKnownSize, IPcieConnectorClient, IPcieMsiSink
+    {
+        public PcieMsiWindow(IMachine machine)
+        {
+            this.machine = machine;
+            IRQ = new GPIO();
+        }
+ 
+        public GPIO IRQ { get; private set; }     // wired in the .repl: IRQ -> plic@21 (MSI)
+ 
+        public void SetConnector(PcieConnector connector) { }
+        public void Trace(string message) { this.Log(LogLevel.Debug, "{0}", message); }
+        public void Reset() { lastData = 0; }
+ 
+        public void ReceiveMsi(uint address, uint data)
+        {
+            if((address & 0xFFFFF000u) != WindowBase)
+            {
+                this.Log(LogLevel.Warning, "RP MSI write to 0x{0:X8} ignored (not the MSI window)", address);
+                return;
+            }
+            lastData = data;
+            this.Log(LogLevel.Debug, "RP MSI received addr=0x{0:X8} data=0x{1:X} -> IRQ asserted", address, data);
+            IRQ.Set(true);
+        }
+ 
+        public uint ReadDoubleWord(long offset) { return lastData; }
+ 
+        public void WriteDoubleWord(long offset, uint value)
+        {
+            this.Log(LogLevel.Debug, "RP MSI cleared");
+            IRQ.Set(false);
+        }
+ 
+        public long Size => 0x1000;
+ 
+        private const uint WindowBase = 0xB0000000;   // must match the .repl and the MSI address in firmware
+        private uint lastData;
+        private readonly IMachine machine;
+    }
+ 
+    // ===================== Endpoint (machine "ep") =====================
+    // Type 0 header, BAR0 (4 KB register block), capability list with an MSI capability.
     public class PcieEndpoint : IDoubleWordPeripheral, IKnownSize, IPcieConfigTarget
     {
         public PcieEndpoint(IMachine machine)
@@ -247,7 +443,12 @@ namespace Antmicro.Renode.Peripherals.PCI
             cfg[0x08 / 4] = 0x05800001;  // Class 0x05 (memory), subclass 0x80, Rev 1
             cfg[0x0C / 4] = 0x00000000;  // Header type 0
             cfg[0x10 / 4] = 0x00000000;  // BAR0
+            cfg[0x34 / 4] = 0x00000040;  // Capabilities pointer -> 0x40
+            cfg[0x40 / 4] = 0x00000005;  // Cap ID 0x05 (MSI), next = 0x00, message control = 0
+            // 0x44 = MSI message address, 0x48 = MSI message data
         }
+ 
+        public void SetUpstream(PcieConnector connector) { upstream = connector; }
  
         // ---- config space (called by the connector) ----
         public uint ConfigRead(int reg)
@@ -269,7 +470,10 @@ namespace Antmicro.Renode.Peripherals.PCI
                 case 0x04: // Command: only lower 16 bits writable
                     cfg[reg / 4] = (cfg[reg / 4] & 0xFFFF0000) | (value & 0x0000FFFF);
                     break;
-                case 0x00: case 0x08: case 0x0C: // read-only
+                case 0x00: case 0x08: case 0x0C: case 0x34: // read-only
+                    break;
+                case 0x40: // MSI capability header: only the MSI Enable bit (bit 16) is writable
+                    cfg[reg / 4] = (cfg[reg / 4] & ~0x00010000u) | (value & 0x00010000u);
                     break;
                 default:
                     cfg[reg / 4] = value;
@@ -277,52 +481,124 @@ namespace Antmicro.Renode.Peripherals.PCI
             }
         }
  
-        // ---- BAR0 register block ----
-        // 0x00: SCRATCH (read/write)   0x04: MAGIC (read-only, 0xE0E0E0E0)
-        // Reached from the Root Port machine through the connector (BarRead/BarWrite),
-        // and also directly on the ep machine's own bus (ReadDoubleWord/WriteDoubleWord).
-        // Memory Space Enable (Command bit 1) must be set, like on real hardware.
-        public uint BarRead(long offset)
+        // ---- memory space (called by the connector) ----
+        public uint BarRead(uint address)
         {
-            if((cfg[0x04 / 4] & 0x2) == 0)
+            if(!BarHit(address))
             {
-                this.Log(LogLevel.Warning, "EP BAR RD ignored: Memory Space Enable is off");
                 return 0xFFFFFFFF;
             }
-            var v = offset == 0x04 ? 0xE0E0E0E0 : regs[(offset & 0xFFC) / 4];
-            this.Log(LogLevel.Debug, "EP BAR RD off 0x{0:X} -> 0x{1:X8}", offset, v);
+            var v = RegRead(address & 0xFFF);
+            this.Log(LogLevel.Debug, "EP BAR RD off 0x{0:X} -> 0x{1:X8}", address & 0xFFF, v);
             return v;
         }
  
-        public void BarWrite(long offset, uint value)
+        public void BarWrite(uint address, uint value)
+        {
+            if(!BarHit(address))
+            {
+                return;
+            }
+            this.Log(LogLevel.Debug, "EP BAR WR off 0x{0:X} <- 0x{1:X8}", address & 0xFFF, value);
+            RegWrite(address & 0xFFF, value);
+        }
+ 
+        // Memory Space Enable (Command bit 1) must be on and the address must match the programmed BAR0.
+        private bool BarHit(uint address)
         {
             if((cfg[0x04 / 4] & 0x2) == 0)
             {
-                this.Log(LogLevel.Warning, "EP BAR WR ignored: Memory Space Enable is off");
-                return;
+                this.Log(LogLevel.Warning, "EP BAR access 0x{0:X8} ignored: Memory Space Enable is off", address);
+                return false;
             }
-            this.Log(LogLevel.Debug, "EP BAR WR off 0x{0:X} <- 0x{1:X8}", offset, value);
+            if((address & 0xFFFFF000u) != (cfg[0x10 / 4] & 0xFFFFF000u))
+            {
+                this.Log(LogLevel.Warning, "EP BAR access 0x{0:X8} ignored: does not match BAR0 0x{1:X8}", address, cfg[0x10 / 4]);
+                return false;
+            }
+            return true;
+        }
+ 
+        // ---- BAR0 register block ----
+        // 0x00: SCRATCH (read/write)   0x04: MAGIC (read-only, 0xE0E0E0E0)
+        // 0x08: DOORBELL (bit 0 = 1 raises an interrupt: MSI if enabled, otherwise INTx; bit 0 = 0 clears INTx)
+        private uint RegRead(long offset)
+        {
+            if(offset == 0x04)
+            {
+                return 0xE0E0E0E0;
+            }
+            return regs[(offset & 0xFFC) / 4];
+        }
+ 
+        private void RegWrite(long offset, uint value)
+        {
             if(offset == 0x04)
             {
                 return;
             }
             regs[(offset & 0xFFC) / 4] = value;
+            if(offset == 0x08)
+            {
+                Doorbell((value & 1) != 0);
+            }
         }
  
-        public uint ReadDoubleWord(long offset)
+        private void Doorbell(bool ring)
         {
-            return BarRead(offset);
+            if(!ring)
+            {
+                SetIntx(false);
+                return;
+            }
+            if(((cfg[0x40 / 4] >> 16) & 1) != 0)       // MSI enabled -> send an MSI write
+            {
+                if((cfg[0x04 / 4] & 0x4) == 0)
+                {
+                    this.Log(LogLevel.Warning, "EP MSI not sent: Bus Master Enable is off");
+                    return;
+                }
+                var addr = cfg[0x44 / 4];
+                var data = cfg[0x48 / 4] & 0xFFFF;
+                this.Log(LogLevel.Debug, "EP MSI send addr=0x{0:X8} data=0x{1:X}", addr, data);
+                if(upstream != null)
+                {
+                    upstream.SendMsi(addr, data);
+                }
+            }
+            else
+            {
+                SetIntx(true);
+            }
         }
  
-        public void WriteDoubleWord(long offset, uint value)
+        // Legacy INTx: Status bit 3 (Interrupt Status) mirrors the interrupt line.
+        private void SetIntx(bool level)
         {
-            BarWrite(offset, value);
+            if(level)
+            {
+                cfg[0x04 / 4] |= 0x00080000u;
+            }
+            else
+            {
+                cfg[0x04 / 4] &= ~0x00080000u;
+            }
+            this.Log(LogLevel.Debug, "EP INTx {0}", level ? "asserted" : "deasserted");
+            if(upstream != null)
+            {
+                upstream.RaiseInterrupt(level);
+            }
         }
+ 
+        // Direct access on the ep machine's own bus (for debugging from the Renode monitor).
+        public uint ReadDoubleWord(long offset) { return RegRead(offset); }
+        public void WriteDoubleWord(long offset, uint value) { RegWrite(offset, value); }
  
         public long Size => 0x1000;
  
         private uint[] cfg;
         private uint[] regs;
+        private PcieConnector upstream;
         private readonly IMachine machine;
     }
 }
