@@ -2,10 +2,6 @@
 #include <zephyr/sys/sys_io.h>
 #include <stdint.h>
 
-/* Firmware that runs on the ENDPOINT machine (ep).
- * The PcieEndpoint peripheral sits on this machine's own bus at 0xA0000000.
- * This firmware does not drive PCIe; it boots Zephyr and watches what the
- * Root Port machine configures and writes through the connector. */
 #define EP_BASE      0xA0000000UL
 
 #define REG_SCRATCH  0x00
