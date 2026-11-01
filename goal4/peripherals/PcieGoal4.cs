@@ -454,6 +454,7 @@ namespace Antmicro.Renode.Peripherals.PCI
         {
             cfg = new uint[1024];
             regs = new uint[1024];
+            hostWrites = 0;
             cfg[0x00 / 4] = 0x00021234;  // Device ID 0x0002 | Vendor ID 0x1234
             cfg[0x04 / 4] = 0x00100000;  // Status: capabilities list; Command = 0
             cfg[0x08 / 4] = 0x05800001;  // Class 0x05 (memory), subclass 0x80, Rev 1
@@ -516,6 +517,7 @@ namespace Antmicro.Renode.Peripherals.PCI
                 return;
             }
             this.Log(LogLevel.Debug, "EP BAR WR off 0x{0:X} <- 0x{1:X8}", address & 0xFFF, value);
+            hostWrites++;
             RegWrite(address & 0xFFF, value);
         }
  
@@ -538,20 +540,38 @@ namespace Antmicro.Renode.Peripherals.PCI
         // ---- BAR0 register block ----
         // 0x00: SCRATCH (read/write)   0x04: MAGIC (read-only, 0xE0E0E0E0)
         // 0x08: DOORBELL (bit 0 = 1 raises an interrupt: MSI if enabled, otherwise INTx; bit 0 = 0 clears INTx)
+        // 0x0C: STATUS (read-only)  0x10: BAR0 value (read-only)  0x14: host write count (read-only)
+        // 0x0C..0x14 let the firmware running on the Endpoint machine see what the Root Port side has configured.
         private uint RegRead(long offset)
         {
-            if(offset == 0x04)
+            switch(offset & 0xFFC)
             {
-                return 0xE0E0E0E0;
+                case 0x04: return 0xE0E0E0E0;       // MAGIC
+                case 0x0C: return StatusBits();      // STATUS (what the host has configured)
+                case 0x10: return cfg[0x10 / 4];     // BAR0 value programmed by the host
+                case 0x14: return hostWrites;        // number of BAR writes made by the host
             }
             return regs[(offset & 0xFFC) / 4];
         }
  
+        // bit0 BAR0 programmed, bit1 Memory Space on, bit2 Bus Master on, bit3 MSI enabled, bit4 INTx asserted
+        private uint StatusBits()
+        {
+            uint s = 0;
+            if((cfg[0x10 / 4] & 0xFFFFF000u) != 0) { s |= 0x01; }
+            if((cfg[0x04 / 4] & 0x2) != 0) { s |= 0x02; }
+            if((cfg[0x04 / 4] & 0x4) != 0) { s |= 0x04; }
+            if(((cfg[0x40 / 4] >> 16) & 1) != 0) { s |= 0x08; }
+            if((cfg[0x04 / 4] & 0x00080000u) != 0) { s |= 0x10; }
+            return s;
+        }
+ 
         private void RegWrite(long offset, uint value)
         {
-            if(offset == 0x04)
+            var o = offset & 0xFFC;
+            if(o == 0x04 || o == 0x0C || o == 0x10 || o == 0x14)
             {
-                return;
+                return;                              // read-only registers
             }
             regs[(offset & 0xFFC) / 4] = value;
             if(offset == 0x08)
@@ -615,6 +635,7 @@ namespace Antmicro.Renode.Peripherals.PCI
         private uint[] cfg;
         private uint[] regs;
         private PcieConnector upstream;
+        private uint hostWrites;
         private readonly IMachine machine;
     }
 }

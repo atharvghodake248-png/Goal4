@@ -2,14 +2,15 @@ include @D:/1_Project/goal4/peripherals/PcieGoal4.cs
 
 emulation CreatePcieConnector "pcie"
 
-# ---- machine "ep": second AE350 machine that hosts the Endpoint (its CPU stays halted) ----
+# ---- machine "ep": AE350 running its own Zephyr firmware, hosts the Endpoint ----
 mach create "ep"
 machine LoadPlatformDescriptionFromString "using \"D:/1_Project/goal4/pcie_ep.repl\""
-sysbus.cpu0 IsHalted true
+showAnalyzer sysbus.uart1
 logLevel -1 sysbus.pcieEp
 connector Connect sysbus.pcieEp pcie
+sysbus LoadELF @D:/1_Project/goal4/fw_ep/zephyr.elf
 
-# ---- machine "rp": AE350 running the Zephyr firmware ----
+# ---- machine "rp": AE350 running the Root Port firmware ----
 mach create "rp"
 machine LoadPlatformDescriptionFromString "using \"D:/1_Project/goal4/ae350_pcie_rp.repl\""
 showAnalyzer sysbus.uart1
