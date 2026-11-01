@@ -1,24 +1,23 @@
 # Goal 4: PCIe Root Port and Endpoint Simulation using Renode
 
 ## Overview
-A PCIe Root Port and Endpoint simulation built with Renode and Zephyr RTOS. Two emulated AE350 machines are linked by a custom in-process connector. It demonstrates configuration-space access, BAR-based MMIO, and interrupt signalling between the machines. The Root Port firmware uses hand-written MMIO only (no PCIe driver API).
+A PCIe Root Port and Endpoint simulation built with Renode and Zephyr RTOS. Two emulated AE350 machines are linked by a custom in-process connector. It demonstrates configuration-space access, BAR-based MMIO, and INTx interrupt signalling between the machines. The Root Port firmware uses hand-written MMIO only (no PCIe driver API).
 
 ## Version to review
-- Branch: `goal4-charter-only`
+- Branch: `goal4-charter-only` (charter scope: INTx round trip, no MSI)
 - Code commit: `c405e4a` (adds machine timer and PLIC_SW to the AE350 base platform)
-- MSI demo: commit `94cd4ea` on `main`. This branch's run shows the INTx round trip only.
+- MSI is not part of this branch. The MSI version (MSI window, bridge window checks, Bus Master gating) is commit `94cd4ea` on `main`.
 
 ## Architecture
-1. **Root Port machine (rp):** Type 1 Root Port, BAR window, MSI window and the Root Port Zephyr firmware.
-2. **Endpoint machine (ep):** Type 0 Endpoint (BAR0, capability list with MSI) and the Endpoint Zephyr firmware.
-3. **PcieConnector:** modeled on GPIOConnector. Forwards config, BAR, INTx and MSI traffic between the two machines.
+1. **Root Port machine (rp):** Type 1 Root Port, BAR window and the Root Port Zephyr firmware.
+2. **Endpoint machine (ep):** Type 0 Endpoint (BAR0, capability list with one vendor-specific capability) and the Endpoint Zephyr firmware.
+3. **PcieConnector:** modeled on GPIOConnector. Forwards config, BAR and INTx traffic between the two machines. In this branch it does not check the bridge memory window or Bus Master Enable.
 
 ## Configuration
 | Component | Address / Value |
 |---|---|
 | Root Port (Type 1 bridge) | `0x90000000` |
 | Root Port BAR window | `0xA0000000` |
-| MSI window | `0xB0000000` |
 | Endpoint BAR0 | `0xA0000000`, 4 KB |
 | Root Port IDs | vendor `0x1234`, device `0x0001` |
 | Endpoint IDs | vendor `0x1234`, device `0x0002` |
