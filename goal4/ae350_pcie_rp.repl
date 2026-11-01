@@ -1,4 +1,4 @@
-using "platforms/cpus/andes_ae350_n25.repl"
+using "D:/1_Project/goal4/ae350_base.repl"
 
 pcieRp: PCI.PcieRootPort @ sysbus 0x90000000
 
