@@ -16,8 +16,6 @@ machine LoadPlatformDescriptionFromString "using \"D:/1_Project/goal4/ae350_pcie
 showAnalyzer sysbus.uart1
 logLevel -1 sysbus.pcieRp
 logLevel -1 sysbus.pcieBar
-logLevel -1 sysbus.pcieMsi
 connector Connect sysbus.pcieRp pcie
 connector Connect sysbus.pcieBar pcie
-connector Connect sysbus.pcieMsi pcie
 sysbus LoadELF @D:/1_Project/goal4/fw/zephyr.elf

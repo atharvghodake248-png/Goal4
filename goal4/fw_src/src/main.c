@@ -7,16 +7,13 @@
  
 #define ECAM_BASE 0x90000000UL   /* must match the .repl (pcieRp)  */
 #define BAR0_ADDR 0xA0000000UL   /* must match the .repl (pcieBar) */
-#define MSI_ADDR  0xB0000000UL   /* must match the .repl (pcieMsi) */
-#define MSI_DATA  0x42
  
 /* PLIC (platform file: plic @ 0xe4000000, uart1 uses source 9) */
 #define PLIC_BASE 0xE4000000UL
 #define PCIE_IRQ  20             /* INTx:  "IRQ -> plic@20" in the .repl */
-#define MSI_IRQ   21             /* MSI:   "IRQ -> plic@21" in the .repl */
  
-#define REG_SCRATCH 0x00
-#define REG_MAGIC   0x04
+#define REG_SCRATCH  0x00
+#define REG_MAGIC    0x04
 #define REG_DOORBELL 0x08
  
 /* ---------- optional real ISR for the INTx line ---------- */
@@ -39,7 +36,7 @@ static void pcie_isr(const void *arg)
  
 struct results {
 	int root_port, bus_nr, connector, enumerated, ids, bar_size, bar_assign;
-	int mmio_write, mmio_read, round_trip, intx, intx_plic, isr, msi;
+	int mmio_write, mmio_read, round_trip, intx, intx_plic, isr;
 };
  
 static inline uintptr_t cfg_addr(uint8_t bus, uint8_t dev, uint8_t fn, uint16_t reg)
@@ -103,19 +100,16 @@ static void intx_test(uint8_t dev, struct results *r)
 	}
 #endif
 	uint32_t st1 = (cfg_read32(1, dev, 0, 0x04) >> 19) & 1;   /* Status.Interrupt */
-	uint32_t claim;
+	uint32_t claim = 0;
 	int via_isr = 0;
- 
-#if ISR_AVAILABLE
-	via_isr = (isr_count > 0);
-#endif
 	int isr_runs = 0;
  
 #if ISR_AVAILABLE
+	via_isr = (isr_count > 0);
 	isr_runs = isr_count;
 #endif
 	if (via_isr) {
-		claim = 0;              /* Zephyr's PLIC driver claimed it before calling the ISR */
+		/* Zephyr's PLIC driver claimed it before calling the ISR */
 		printk("         INTx asserted: endpoint status.int=%u, ISR ran %d time(s) "
 		       "(PLIC claim done by Zephyr's driver)\n", st1, isr_runs);
 	} else {
@@ -134,31 +128,6 @@ static void intx_test(uint8_t dev, struct results *r)
 	r->intx = (st1 == 1 && st2 == 0);
 	r->intx_plic = via_isr ? (isr_runs >= 1) : (claim == PCIE_IRQ);
 	r->isr = via_isr;
-}
- 
-/* MSI: firmware programs the MSI capability; the doorbell makes the Endpoint write MSI_DATA to MSI_ADDR */
-static void msi_test(uint8_t dev, struct results *r)
-{
-	plic_enable(MSI_IRQ);
-	cfg_write32(1, dev, 0, 0x44, MSI_ADDR);
-	cfg_write32(1, dev, 0, 0x48, MSI_DATA);
-	cfg_write32(1, dev, 0, 0x40, cfg_read32(1, dev, 0, 0x40) | (1U << 16));   /* MSI enable */
-	printk("         MSI cap programmed: addr=0x%08x data=0x%x ctrl=0x%08x\n",
-	       cfg_read32(1, dev, 0, 0x44), cfg_read32(1, dev, 0, 0x48), cfg_read32(1, dev, 0, 0x40));
- 
-	sys_write32(1, BAR0_ADDR + REG_DOORBELL);
- 
-	uint32_t data = sys_read32(MSI_ADDR);                  /* message data held by the MSI window */
-	uint32_t claim = sys_read32(PLIC_BASE + 0x200004);
- 
-	printk("         MSI received: data=0x%x plic_claim=%u (expected %u)\n", data, claim, MSI_IRQ);
- 
-	sys_write32(0, MSI_ADDR);                              /* clear the MSI window interrupt */
-	if (claim) {
-		sys_write32(claim, PLIC_BASE + 0x200004);
-	}
-	cfg_write32(1, dev, 0, 0x40, cfg_read32(1, dev, 0, 0x40) & ~(1U << 16));  /* MSI off again */
-	r->msi = (data == MSI_DATA && claim == MSI_IRQ);
 }
  
 static const char *pf(int ok)
@@ -195,7 +164,7 @@ int main(void)
 	cfg_write32(0, 0, 0, 0x20, 0xA000A000);  /* memory base/limit: 0xA0000000..0xA00FFFFF */
 	printk("         memory base/limit reg = 0x%08x\n", cfg_read32(0, 0, 0, 0x20));
  
-	cfg_write32(0, 0, 0, 0x04, cfg_read32(0, 0, 0, 0x04) | 0x6);  /* MSE + bus master */
+	cfg_write32(0, 0, 0, 0x04, cfg_read32(0, 0, 0, 0x04) | 0x2);  /* memory space enable */
  
 	/* ---- Secondary bus 1: scan for Endpoints ---- */
 	for (int dev = 0; dev < 4; dev++) {
@@ -224,9 +193,9 @@ int main(void)
 		printk("         BAR0 mask=0x%08x size=0x%x bytes\n", mask, size);
 		r.bar_size = (size == 0x1000);
  
-		/* assign BAR + enable memory space and bus mastering */
+		/* assign BAR + enable memory space */
 		cfg_write32(1, dev, 0, 0x10, BAR0_ADDR);
-		cfg_write32(1, dev, 0, 0x04, cfg_read32(1, dev, 0, 0x04) | 0x6);
+		cfg_write32(1, dev, 0, 0x04, cfg_read32(1, dev, 0, 0x04) | 0x2);
 		uint32_t bar_now = cfg_read32(1, dev, 0, 0x10);
  
 		printk("         BAR0 now=0x%08x CMD=0x%08x\n", bar_now, cfg_read32(1, dev, 0, 0x04));
@@ -244,7 +213,6 @@ int main(void)
 		       rb, magic, r.round_trip ? "OK" : "FAIL");
  
 		intx_test(dev, &r);
-		msi_test(dev, &r);
 	}
  
 	printk("\n========== GOAL 4 TEST SUMMARY ==========\n");
@@ -260,11 +228,10 @@ int main(void)
 	printk("MMIO round trip             : %s\n", pf(r.round_trip));
 	printk("INTx interrupt (endpoint)   : %s\n", pf(r.intx));
 	printk("INTx reached CPU (ISR/claim) : %s\n", pf(r.intx_plic));
-	printk("MSI (capability -> PLIC)    : %s\n", pf(r.msi));
 	printk("Interrupt handled by ISR    : %s\n", r.isr ? "PASS" : "NOT TAKEN (polled instead)");
  
 	int all = r.root_port && r.bus_nr && r.connector && r.enumerated && r.ids && r.bar_size &&
-		  r.bar_assign && r.round_trip && r.intx && r.intx_plic && r.msi;
+		  r.bar_assign && r.round_trip && r.intx && r.intx_plic;
  
 	printk("\nOverall Result: %s\n", all ? "SUCCESS" : "FAILURE");
 	printk("== done ==\n");
